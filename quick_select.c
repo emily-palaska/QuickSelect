@@ -38,7 +38,7 @@ int main(int argc, char *argv[]) {
     int n = sizeof(A) / sizeof(int);
     randperm(n, A);
     
-    kselect(A, n, 6, argc, argv);
+    kselect(A, n, 1, argc, argv);
     	
     return 0;
 }
@@ -55,6 +55,7 @@ void kselect(int A[], int n, int k, int argc, char *argv[]) {
 	int termination_signal = 0;
 	
 	int* left;
+	int* middle;
 	int* right;
 	int* A_local;
 	
@@ -70,12 +71,12 @@ void kselect(int A[], int n, int k, int argc, char *argv[]) {
 	// master process initialization
 	if (my_rank == 0) {
 		left = malloc(num_procs * sizeof(int));
+		middle = malloc(num_procs * sizeof(int));
 		right = malloc(num_procs * sizeof(int));
 		pivot = A[0];
 		direction = 1;
 		
-		// PRINTING
-		
+		// PRINTING		
 		print_array(A, n);
 		printf("New pivot is %d\n", pivot);
 	}
@@ -93,7 +94,8 @@ void kselect(int A[], int n, int k, int argc, char *argv[]) {
 	// change local_size if memory not perfectly divided
 	if (my_rank == num_procs - 1) local_size = n - my_rank * local_size;
 	//pointer to the available parts of the local arrays
-	int pointers[3] = {0, 0, local_size - 1};
+	int pointers[2] = {0, local_size - 1};
+	int breakpoint = 0;
 	
 	//-----------------------------------------------------------------
 	int counter = 0;
@@ -103,57 +105,55 @@ void kselect(int A[], int n, int k, int argc, char *argv[]) {
 		MPI_Barrier(MPI_COMM_WORLD);	
 
 		// PROCCESS LOGIC
-		if (my_rank < n) {			
+		if (my_rank < n) {
+			if (pointers[1] == local_size) pointers[1]--;			
 			
-			printf("Process %d performs partition to (%d, %d)\n", my_rank, pointers[0], pointers[2]);
-			
+			printf("Process %d performs partition to (%d, %d)\n", my_rank, pointers[0], pointers[1]);
+			// zero elements left
+			if (pointers[0] >= local_size) breakpoint = local_size;
+			else if (pointers[1] <= 0) breakpoint = 0; 
 			// one element left
-			if (pointers[2] == pointers[0])
-				pointers[1] = pointers[0];
+			else if (pointers[1] == pointers[0]) {
+				if (pivot >= A_local[pointers[0]]) breakpoint = pointers[0] + 1;
+				else breakpoint = pointers[0];
+			}
 			// more than one elements are left
 			else
-				pointers[1] = partitioninplace(A_local, local_size, pivot, pointers[0], pointers[2]);
+				breakpoint = partitioninplace(A_local, local_size, pivot, pointers[0], pointers[1]);
+			printf("Process %d array after partition: ", my_rank);
+			for(int i = pointers[0]; i <= pointers[1]; i++) printf("%d ", A_local[i]);
+			printf("\n");
 			
 			//send poitners
-			MPI_Send(pointers, 3, MPI_INT, 0, my_rank, MPI_COMM_WORLD);
+			MPI_Send(&breakpoint, 1, MPI_INT, 0, my_rank, MPI_COMM_WORLD);
 		}
 		
-		MPI_Barrier(MPI_COMM_WORLD);
 		if (my_rank == 0) {
 			//receive pointers
-			int recv_data[3];
 			for(int i = 0; i < num_procs; i++) {
-				MPI_Recv(recv_data, 3, MPI_INT, i, i, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-				left[i] = recv_data[0];
-				right[i] = recv_data[1];
-			}
-			printf("Left is:\t");
-			print_array(left, num_procs);
-			printf("Right is:\t");
-			print_array(right, num_procs);
-		
+				MPI_Recv(&middle[i], 1, MPI_INT, i, i, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+			}		
 			// elements smaller than pivot
-			int sum = 0;
-			for(int i = 0; i < num_procs; i++) sum += right[i] - left[i];
-			printf("Found %d elements smaller than %d\n", sum, pivot);
+			int elementsSmallerThanPivot = 0;			
+			for(int i = 0; i < num_procs; i++) {
+				elementsSmallerThanPivot += middle[i];
+			}
+			printf("Found %d elements smaller than %d\n", elementsSmallerThanPivot, pivot);
 			
 			//checks for next step
-			if (sum + 1 == k) {
-				printf("Found kth smallest element.\n\n");
+			if (elementsSmallerThanPivot + 1 == k) {
+				printf("Found kth smallest element.\n");
 				termination_signal = 1;
 			}
 			else {
-				if (sum + 1 > k) {
-					printf("Checking on the left part\n\n");
+				if (elementsSmallerThanPivot + 1 > k) {
+					printf("Checking on the left part\n");
 					direction = 0;
 					}
-				else {
-					printf("Checking on the right part.\n\n");
+				else {					
 					direction = 1;
-					k = k - sum;
-				}
-				
-					
+					printf("Checking on the right part.\n");
+				}		
 			}		
 		}		
 		// Exit the loop if termination signal is broadcasted
@@ -161,35 +161,52 @@ void kselect(int A[], int n, int k, int argc, char *argv[]) {
 		MPI_Bcast(&termination_signal, 1, MPI_INT, 0, MPI_COMM_WORLD);
 		if (termination_signal) break;
 		
-		// Broadcast pivot sender, k and direction
-		MPI_Bcast(&direction, 1, MPI_INT, 0, MPI_COMM_WORLD);
-		MPI_Bcast(&k, 1, MPI_INT, 0, MPI_COMM_WORLD);
+		// Broadcast direction
+		MPI_Bcast(&direction, 1, MPI_INT, 0, MPI_COMM_WORLD);				
 		
 		// handle direction if array still is usable
-		if (direction) {
-			 if (A_local[pointers[1]] == pivot) pointers[0] = pointers[1] + 1;
-			 else pointers[0] = pointers[1];
-		}
-		else {
-			if (A_local[pointers[1]] == pivot) pointers[2] = pointers[1] - 1;
-			else pointers[2] = pointers[1];		
+		if (direction) pointers[0] = breakpoint;
+		else pointers[1] = breakpoint;
+		
+		// exclude the pivot in the next step
+		if (my_rank == pivot_sender) {
+				int pivotIndex;
+				for(int i = 0; i < local_size; i++)
+					if (A_local[i] == pivot) {
+						pivotIndex = i;
+						break;
+					}
+				
+				
+				A_local[pivotIndex] = A_local[pointers[!direction]];
+				A_local[pointers[!direction]] = pivot;
+				
+				if (direction) pointers[!direction]++;
+				else pointers[!direction]--;
 		}
 		
-		// find a process with usable values to make pivot sender
-		if(my_rank == 0) {
+		
+		MPI_Barrier(MPI_COMM_WORLD);
+		// assign new pivot sender
+		
+		if (my_rank < n) {
+			MPI_Send(pointers, 2, MPI_INT, 0, my_rank, MPI_COMM_WORLD);
+		}
+		if (my_rank == 0) {
+			int recv_data[2];
 			for(int i = 0; i < num_procs; i++) {
-				if (right[i] != left[i]) {
-					pivot_sender = i;
-					break;
-				}
-			}
-		}		
+				MPI_Recv(&recv_data, 2, MPI_INT, i, i, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+				if (recv_data[0] <= recv_data[1]) pivot_sender = i;
+			}	
+		}
+			
 		MPI_Bcast(&pivot_sender, 1, MPI_INT, 0, MPI_COMM_WORLD);
+		MPI_Barrier(MPI_COMM_WORLD);
+		
 		// pivot sender assigns new pivot value
 		if (my_rank == pivot_sender) {
-			if (direction) pivot = A_local[pointers[1]];	
-			else pivot = A_local[pointers[1]];
-			printf("New pivot is %d\n", pivot);
+			pivot = A_local[pointers[0]];
+			printf("\nNew pivot is %d from process %d\n", pivot, my_rank);
 		}
 		MPI_Bcast(&pivot, 1, MPI_INT, pivot_sender, MPI_COMM_WORLD);
 	}
@@ -199,6 +216,7 @@ void kselect(int A[], int n, int k, int argc, char *argv[]) {
 		printf("kth smallest element in array is %d\n", pivot);
 	
 		free(left);
+		free(middle);
 		free(right);
 	}
 	free(A_local);	
@@ -243,12 +261,7 @@ int partitioninplace(int A[], int n, int v, int start, int end) {
                 right--;
         }
     }
-    // when pivot is found it should be placed at the breaking point
-    if(pivotIndex != n) {
-    	temp = A[pivotIndex];
-    	A[pivotIndex] = A[left];
-    	A[left] = temp;
-    }
     
+    if (A[left] < v) left++;
     return left;
 }
