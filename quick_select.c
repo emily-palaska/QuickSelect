@@ -34,11 +34,11 @@ void randperm(int n, int *A) {
 }
 
 int main(int argc, char *argv[]) {
-    int A[10];    
+    int A[10];
     int n = sizeof(A) / sizeof(int);
     randperm(n, A);
     
-    kselect(A, n, 1, argc, argv);
+    kselect(A, n, 6, argc, argv);
     	
     return 0;
 }
@@ -51,28 +51,53 @@ int main(int argc, char *argv[]) {
 	for the direction: 0 -> left & 1 -> right
 */
 void kselect(int A[], int n, int k, int argc, char *argv[]) {
-	int num_procs, my_rank, pivot, pivot_sender, direction;
+	int num_procs, my_rank, pivot, pivot_sender, direction, breakpoint;
 	int termination_signal = 0;
-	
-	int* left;
-	int* middle;
-	int* right;
 	int* A_local;
+	int* breakpoints;
+
+	MPI_Init(&argc, &argv);
+	MPI_Comm_size(MPI_COMM_WORLD, &num_procs);
+	MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
 	
 	if (k > n && !my_rank) {
 		printf("k element out of bouns\n");
 		return;
+	}	
+		
+	// decide size to be distributed and allocate memory	
+	int local_size = n / num_procs;	
+	if (n % num_procs) local_size++;
+	
+	// calculate how many processes will have data distributed to them
+	int activeProcs;
+	if (num_procs >= n) activeProcs = n;
+	else {
+		activeProcs = n / local_size;
+		if (n % local_size) activeProcs++;
+	}
+	if (!my_rank) printf("Using %d processes\n", activeProcs);
+	
+	// allocate memory for the data	
+	if (my_rank < activeProcs) {
+		A_local = (int*)malloc(local_size * sizeof(int));
+		if (A_local == NULL) {
+			perror("Memory allocation failed");
+			exit(1);
+		}
 	}
 	
-	MPI_Init(&argc, &argv);
-	MPI_Comm_size(MPI_COMM_WORLD, &num_procs);
-	MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);	
+	//distribute the data accordingly
+	MPI_Scatter(A, local_size, MPI_INT, A_local, local_size, MPI_INT, 0, MPI_COMM_WORLD);
+	MPI_Bcast(&pivot, 1, MPI_INT, 0, MPI_COMM_WORLD);
+	MPI_Bcast(&direction, 1, MPI_INT, 0, MPI_COMM_WORLD);
+	
+	// trim size of last process when needed
+	if (my_rank * local_size < n && (my_rank + 1) * local_size >= n) local_size = n - my_rank * local_size;
 	
 	// master process initialization
 	if (my_rank == 0) {
-		left = malloc(num_procs * sizeof(int));
-		middle = malloc(num_procs * sizeof(int));
-		right = malloc(num_procs * sizeof(int));
+		breakpoints = malloc(activeProcs * sizeof(int));
 		pivot = A[0];
 		direction = 1;
 		
@@ -81,21 +106,8 @@ void kselect(int A[], int n, int k, int argc, char *argv[]) {
 		printf("New pivot is %d\n", pivot);
 	}
 	
-	//decide size to be distributed and allocate memory	
-	int local_size = n / num_procs;
-	if (n % num_procs) local_size++;
-	A_local = (int*)malloc(local_size * sizeof(int));
-	
-	//distribute the data accordingly
-	MPI_Scatter(A, local_size, MPI_INT, A_local, local_size, MPI_INT, 0, MPI_COMM_WORLD);
-	MPI_Bcast(&pivot, 1, MPI_INT, 0, MPI_COMM_WORLD);
-	MPI_Bcast(&direction, 1, MPI_INT, 0, MPI_COMM_WORLD);
-	
-	// change local_size if memory not perfectly divided
-	if (my_rank == num_procs - 1) local_size = n - my_rank * local_size;
 	//pointer to the available parts of the local arrays
 	int pointers[2] = {0, local_size - 1};
-	int breakpoint = 0;
 	
 	//-----------------------------------------------------------------
 	int counter = 0;
@@ -105,17 +117,20 @@ void kselect(int A[], int n, int k, int argc, char *argv[]) {
 		MPI_Barrier(MPI_COMM_WORLD);	
 
 		// PROCCESS LOGIC
-		if (my_rank < n) {
-			if (pointers[1] == local_size) pointers[1]--;			
+		if (my_rank < activeProcs) {
+			//if (pointers[1] == local_size) pointers[1]--;			
 			
 			printf("Process %d performs partition to (%d, %d)\n", my_rank, pointers[0], pointers[1]);
 			// zero elements left
-			if (pointers[0] >= local_size) breakpoint = local_size;
-			else if (pointers[1] <= 0) breakpoint = 0; 
+			if (pointers[0] > pointers[1]) {}
+			else if (pointers[0] >= local_size) breakpoint = local_size;
+			else if (pointers[1] < 0) breakpoint = 0; 
 			// one element left
 			else if (pointers[1] == pointers[0]) {
-				if (pivot >= A_local[pointers[0]]) breakpoint = pointers[0] + 1;
-				else breakpoint = pointers[0];
+				if (A_local[pointers[0]] >= pivot) breakpoint = pointers[0];
+				else breakpoint = pointers[0] + 1;
+				// make array not usable
+				//pointers[0]++;
 			}
 			// more than one elements are left
 			else
@@ -129,14 +144,16 @@ void kselect(int A[], int n, int k, int argc, char *argv[]) {
 		}
 		
 		if (my_rank == 0) {
+			
 			//receive pointers
-			for(int i = 0; i < num_procs; i++) {
-				MPI_Recv(&middle[i], 1, MPI_INT, i, i, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+			for(int i = 0; i < activeProcs; i++) {
+				MPI_Recv(&breakpoints[i], 1, MPI_INT, i, i, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+				printf("Got %d from process %d\n", breakpoints[i], i);
 			}		
 			// elements smaller than pivot
 			int elementsSmallerThanPivot = 0;			
 			for(int i = 0; i < num_procs; i++) {
-				elementsSmallerThanPivot += middle[i];
+				elementsSmallerThanPivot += breakpoints[i];
 			}
 			printf("Found %d elements smaller than %d\n", elementsSmallerThanPivot, pivot);
 			
@@ -165,38 +182,50 @@ void kselect(int A[], int n, int k, int argc, char *argv[]) {
 		MPI_Bcast(&direction, 1, MPI_INT, 0, MPI_COMM_WORLD);				
 		
 		// handle direction if array still is usable
-		if (direction) pointers[0] = breakpoint;
-		else pointers[1] = breakpoint;
-		
+		if (my_rank < activeProcs) {
+			if (direction) pointers[0] = breakpoint;
+			else pointers[1] = breakpoint - 1;
+		}
+
 		// exclude the pivot in the next step
 		if (my_rank == pivot_sender) {
-				int pivotIndex;
-				for(int i = 0; i < local_size; i++)
+				int pivotIndex = local_size;
+				for(int i = 0; i < local_size; i++) {
 					if (A_local[i] == pivot) {
 						pivotIndex = i;
 						break;
 					}
+				}			
 				
+				// swap the pivot at end of array if it's found within the usable spectrum
+				// ie when direction is right we swap it with the left end and increase the left end
+				// vice verse for left direction. this ensures that each steps limits at least one
+				// element, even if pivot appears many times
+				if (pivotIndex <= pointers[1]) {
+					A_local[pivotIndex] = A_local[pointers[!direction]];
+					A_local[pointers[!direction]] = pivot;
 				
-				A_local[pivotIndex] = A_local[pointers[!direction]];
-				A_local[pointers[!direction]] = pivot;
+					if (direction) pointers[!direction]++;
+					else pointers[!direction]--;
+				}
 				
-				if (direction) pointers[!direction]++;
-				else pointers[!direction]--;
+				// specific occasion that pivot is the only elemnt left
+				if (pointers[0] > pointers[1] && direction) breakpoint++;
 		}
 		
 		
 		MPI_Barrier(MPI_COMM_WORLD);
-		// assign new pivot sender
 		
-		if (my_rank < n) {
+		// assign new pivot sender
+		if (my_rank < activeProcs)
 			MPI_Send(pointers, 2, MPI_INT, 0, my_rank, MPI_COMM_WORLD);
-		}
+
 		if (my_rank == 0) {
 			int recv_data[2];
-			for(int i = 0; i < num_procs; i++) {
+			for(int i = 0; i < activeProcs; i++) {
 				MPI_Recv(&recv_data, 2, MPI_INT, i, i, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-				if (recv_data[0] <= recv_data[1]) pivot_sender = i;
+				if (recv_data[0] <= recv_data[1])
+					pivot_sender = i;
 			}	
 		}
 			
@@ -215,11 +244,9 @@ void kselect(int A[], int n, int k, int argc, char *argv[]) {
 	if (my_rank == 0) {
 		printf("kth smallest element in array is %d\n", pivot);
 	
-		free(left);
-		free(middle);
-		free(right);
+		free(breakpoints);
 	}
-	free(A_local);	
+	if (my_rank < activeProcs) free(A_local);	
 	MPI_Barrier(MPI_COMM_WORLD);
 	MPI_Finalize();
 	return;
