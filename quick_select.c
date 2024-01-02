@@ -3,9 +3,27 @@
 #include <math.h>
 #include <mpi.h>
 #include <time.h>
+#include <curl/curl.h>
+#include <string.h>
+#include <stdint.h>
+#include <inttypes.h>
+
+// Struct for byte streaming.
+typedef struct {
+  char* data;
+  size_t current_byte_size;
+  size_t total_byte_size;
+} STREAM;
+
+// Parsing result.
+typedef struct {
+  uint32_t* data;
+  size_t size;
+} ARRAY;
 
 int partitioninplace(int A[], int n, int v, int start, int end);
-void kselect(int A[], int n, int k, int argc, char *argv[]);
+size_t write_callback(void* data, size_t size, size_t nmemb, void* destination);
+ARRAY getWikiPartition(const char *url, int world_rank, int world_size);
 
 // auxiliary function to print an int array of size n
 void print_array(int *A, int n) {
@@ -34,24 +52,9 @@ void randperm(int n, int *A) {
 }
 
 int main(int argc, char *argv[]) {
-    int A[1000];
-    int n = sizeof(A) / sizeof(int);
-    randperm(n, A);
+    int k = 500;
     
-    kselect(A, n, 532, argc, argv);
-
-    return 0;
-}
-
-
-/*
-	A i an int array with size n
-	kselect finds the the element in position k of the sorted A
-	
-	for the direction: 0 -> left & 1 -> right
-*/
-void kselect(int A[], int n, int k, int argc, char *argv[]) {
-	int num_procs, my_rank, pivot, pivot_sender, direction, breakpoint;
+    int num_procs, my_rank, pivot, pivot_sender, direction, breakpoint, local_size;
 	int termination_signal = 0;
 	int* A_local;
 
@@ -59,11 +62,18 @@ void kselect(int A[], int n, int k, int argc, char *argv[]) {
 	MPI_Comm_size(MPI_COMM_WORLD, &num_procs);
 	MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
 	
-	if (k > n && !my_rank) {
-		printf("k element out of bouns\n");
-		return;
-	}	
-		
+	// ALLOCATE MEMORY FROM WEB
+	const char *url="https://dumps.wikimedia.org/other/static_html_dumps/current/el/skins.lst";
+	ARRAY result = getWikiPartition(url, my_rank, num_procs);
+	local_size = (int)result.size;
+	A_local = (int*)result.data;	
+	printf("I am process %d and got local size %d\n", my_rank, local_size);
+	int activeProcs = num_procs;
+	
+	
+	/*ALLOCATE MEMORY LOCALLY with Scatter
+	int A[] = {1, 2, 3};
+	int n = sizeof(A) / sizeof(int);	
 	// decide size to be distributed and allocate memory	
 	int local_size = n / num_procs;	
 	if (n % num_procs) local_size++;
@@ -90,15 +100,12 @@ void kselect(int A[], int n, int k, int argc, char *argv[]) {
 	
 	// trim size of last process when needed
 	if (my_rank * local_size < n && (my_rank + 1) * local_size > n) local_size = n - my_rank * local_size;
+	*/
 	
 	// master process initialization
 	if (my_rank == 0) {
-		pivot = A[0];
+		pivot = A_local[0];
 		direction = 1;
-		
-		// PRINTING		
-		//print_array(A, n);
-		//printf("New pivot is %d\n", pivot);
 	}
 	MPI_Bcast(&pivot, 1, MPI_INT, 0, MPI_COMM_WORLD);
 	MPI_Bcast(&direction, 1, MPI_INT, 0, MPI_COMM_WORLD);
@@ -108,7 +115,7 @@ void kselect(int A[], int n, int k, int argc, char *argv[]) {
 	
 	//-----------------------------------------------------------------
 	int counter = 0;
-	while(counter < n) {
+	while(counter < local_size) {
 		counter++;
 		
 		MPI_Barrier(MPI_COMM_WORLD);	
@@ -243,8 +250,10 @@ void kselect(int A[], int n, int k, int argc, char *argv[]) {
 	}
 	free(A_local);	
 	MPI_Barrier(MPI_COMM_WORLD);
-	MPI_Finalize();
-	return;
+	MPI_Finalize(); 
+    
+
+    return 0;
 }
 
 // function that partitions an input array of size n according to a pivot value v
@@ -281,4 +290,100 @@ int partitioninplace(int A[], int n, int v, int start, int end) {
     
     if (A[left] < v) left++;
     return left;
+}
+
+// Write callback function for curl.
+size_t write_callback(void* data, size_t size, size_t nmemb, void* destination){
+  STREAM* stream=(STREAM*)destination;
+  size_t realsize=size*nmemb;
+  // If first time calling, allocate the needed memory.
+  if(stream->data==NULL){
+    stream->data=(char*)malloc(stream->total_byte_size*sizeof(char));
+  }
+  memcpy(&(stream->data[stream->current_byte_size]),data,realsize);
+  stream->current_byte_size+=realsize;
+
+  return realsize;
+}
+
+ARRAY getWikiPartition(const char *url,int world_rank,int world_size){
+  // Input checking
+  if(world_rank<0||world_rank>=world_size){
+    printf("World rank out of bounds.\n");
+    exit(1);
+  }
+  CURL* curl_handle;
+  CURLcode res; // Error checking
+  double content_length;
+  ARRAY result;
+  
+  curl_global_init(CURL_GLOBAL_ALL);
+  curl_handle=curl_easy_init();
+  if(curl_handle){
+    // Set up url 
+    curl_easy_setopt(curl_handle,CURLOPT_URL,url);
+    // Get file total size. (No body yet)
+    curl_easy_setopt(curl_handle,CURLOPT_NOBODY,1L);
+    //printf("Request1\n");
+    res=curl_easy_perform(curl_handle);
+    //printf("Request1 done\n");
+    if(res!=CURLE_OK){
+      printf("Error in curl_easy_perform()\n");
+      exit(1);
+    }
+    else{
+      res = curl_easy_getinfo(curl_handle,CURLINFO_CONTENT_LENGTH_DOWNLOAD,&content_length);
+      if(res!=CURLE_OK){
+        printf("Error in curl_easy_getinfo().\n");
+        exit(1);
+      }
+    }
+    curl_easy_reset(curl_handle);
+    // Got size, convert to size_t.
+    size_t file_byte_size=(size_t)content_length;
+    //printf("Got size: %zu\n",file_byte_size);
+    // Round out to multiples of 4 since element size is 32 bits (ignore remainder)
+    file_byte_size=(file_byte_size/4)*4;
+    // Partition is done using 32 bit ints as elements 
+    size_t file_int_size=file_byte_size/4;
+    size_t start_byte=(file_int_size/world_size)*world_rank*4;
+    size_t end_byte=(file_int_size/world_size)*(world_rank+1)*4-1;
+    // Last guy takes the remaining elements
+    if(world_rank==world_size-1){
+      end_byte=file_byte_size-1;
+    }
+    // Init downstream
+    STREAM stream;
+    stream.data=NULL;
+    stream.current_byte_size=0;
+    stream.total_byte_size=end_byte-start_byte+1;
+    char* range=(char*)malloc(100*sizeof(char));
+    sprintf(range,"%zu-%zu",start_byte,end_byte);
+    //printf("Range: %s\n",range);
+    // Request body and set rest of options
+    curl_easy_setopt(curl_handle,CURLOPT_URL,url);
+    curl_easy_setopt(curl_handle,CURLOPT_RANGE,range);
+    curl_easy_setopt(curl_handle,CURLOPT_WRITEFUNCTION,write_callback);
+    curl_easy_setopt(curl_handle,CURLOPT_WRITEDATA,(void*)&stream);
+    // Get data..
+    //printf("Request2\n");
+    res=curl_easy_perform(curl_handle);
+    //printf("Request2 done\n");
+    if(res!=CURLE_OK){
+      printf("Problem in data reception\n");
+      exit(1);
+    }
+    //printf("Sizes: %zu %zu\n",stream.current_byte_size,stream.total_byte_size);
+    // Check if you got everything you asked for.
+    if(stream.current_byte_size<stream.total_byte_size){
+      printf("MISSING %zu BYTES\n",stream.total_byte_size-stream.current_byte_size);
+    }
+    // Clean up and pass everything to the array struct. 
+    curl_easy_cleanup(curl_handle);
+    curl_global_cleanup();
+    free(range);
+    result.data=(uint32_t*)stream.data;
+    result.size=stream.current_byte_size/4;
+  }
+  return result;
 }
