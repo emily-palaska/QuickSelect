@@ -52,7 +52,11 @@ void randperm(int n, int *A) {
 }
 
 int main(int argc, char *argv[]) {
-    int k = 500;
+	if (argc != 2) {
+		printf("false arguments\n");
+		exit(1);
+	}
+    int k = atoi(argv[1]);
     
     int num_procs, my_rank, pivot, pivot_sender, direction, breakpoint, local_size;
 	int termination_signal = 0;
@@ -63,11 +67,11 @@ int main(int argc, char *argv[]) {
 	MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
 	
 	// ALLOCATE MEMORY FROM WEB
-	const char *url="https://dumps.wikimedia.org/other/static_html_dumps/current/el/skins.lst";
+	const char *url="https://dumps.wikimedia.org/other/static_html_dumps/current/en/wikipedia-en-html.tar.7z";
 	ARRAY result = getWikiPartition(url, my_rank, num_procs);
 	local_size = (int)result.size;
 	A_local = (int*)result.data;	
-	printf("I am process %d and got local size %d\n", my_rank, local_size);
+	printf("Process %d local size: %d\n", my_rank, local_size);
 	int activeProcs = num_procs;
 	
 	
@@ -101,6 +105,8 @@ int main(int argc, char *argv[]) {
 	// trim size of last process when needed
 	if (my_rank * local_size < n && (my_rank + 1) * local_size > n) local_size = n - my_rank * local_size;
 	*/
+	
+	printf("Starting algorithm\n");
 	
 	// master process initialization
 	if (my_rank == 0) {
@@ -245,11 +251,14 @@ int main(int argc, char *argv[]) {
 	//--------------------------------------------------------------------------
 	// print result and free allocated memory
 	if (my_rank == 0) {
-		printf("kth smallest element in array is %d\n", pivot);
-		printf("used %d steps to find it\n", counter);
+		if (k % 10 == 1) printf("%dst ", k);
+		else if (k % 10 == 2) printf("%dnd ", k);
+		else if (k % 10 == 3) printf("%drd ", k);
+		else printf("%dth ", k);
+		printf("smallest element in array is %d\n", pivot);
+		printf("Algorithm used %d steps to find it\n", counter);
 	}
-	free(A_local);	
-	MPI_Barrier(MPI_COMM_WORLD);
+	free(A_local);
 	MPI_Finalize(); 
     
 
@@ -341,7 +350,6 @@ ARRAY getWikiPartition(const char *url,int world_rank,int world_size){
     curl_easy_reset(curl_handle);
     // Got size, convert to size_t.
     size_t file_byte_size=(size_t)content_length;
-    //printf("Got size: %zu\n",file_byte_size);
     // Round out to multiples of 4 since element size is 32 bits (ignore remainder)
     file_byte_size=(file_byte_size/4)*4;
     // Partition is done using 32 bit ints as elements 
@@ -352,6 +360,7 @@ ARRAY getWikiPartition(const char *url,int world_rank,int world_size){
     if(world_rank==world_size-1){
       end_byte=file_byte_size-1;
     }
+    
     // Init downstream
     STREAM stream;
     stream.data=NULL;
@@ -359,25 +368,25 @@ ARRAY getWikiPartition(const char *url,int world_rank,int world_size){
     stream.total_byte_size=end_byte-start_byte+1;
     char* range=(char*)malloc(100*sizeof(char));
     sprintf(range,"%zu-%zu",start_byte,end_byte);
-    //printf("Range: %s\n",range);
+    
     // Request body and set rest of options
     curl_easy_setopt(curl_handle,CURLOPT_URL,url);
     curl_easy_setopt(curl_handle,CURLOPT_RANGE,range);
     curl_easy_setopt(curl_handle,CURLOPT_WRITEFUNCTION,write_callback);
     curl_easy_setopt(curl_handle,CURLOPT_WRITEDATA,(void*)&stream);
+    
     // Get data..
-    //printf("Request2\n");
     res=curl_easy_perform(curl_handle);
-    //printf("Request2 done\n");
     if(res!=CURLE_OK){
       printf("Problem in data reception\n");
       exit(1);
     }
-    //printf("Sizes: %zu %zu\n",stream.current_byte_size,stream.total_byte_size);
+    
     // Check if you got everything you asked for.
     if(stream.current_byte_size<stream.total_byte_size){
       printf("MISSING %zu BYTES\n",stream.total_byte_size-stream.current_byte_size);
     }
+    
     // Clean up and pass everything to the array struct. 
     curl_easy_cleanup(curl_handle);
     curl_global_cleanup();
