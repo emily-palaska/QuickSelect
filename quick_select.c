@@ -68,7 +68,7 @@ int main(int argc, char *argv[]) {
 		counter++;		
 		MPI_Barrier(MPI_COMM_WORLD);	
 
-		// EAH PROCESS FINDS A BREAKPOINT
+		// EACH PROCESS FINDS A BREAKPOINT
 		if (my_rank < activeProcs) {			
 			// zero elements left
 			if (pointers[0] > pointers[1]) {}
