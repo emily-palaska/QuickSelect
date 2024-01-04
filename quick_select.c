@@ -25,35 +25,9 @@ int partitioninplace(int A[], int n, int v, int start, int end);
 size_t write_callback(void* data, size_t size, size_t nmemb, void* destination);
 ARRAY getWikiPartition(const char *url, int world_rank, int world_size);
 
-// auxiliary function to print an int array of size n
-void print_array(int *A, int n) {
-    for(int i = 0; i < n; i++) printf("%d ", A[i]);
-    printf("\n");
-}
-
-// auxiliary function for validity tests
-void randperm(int n, int *A) {
-	int temp;
-    // Seed for random number generation
-    srand((unsigned int)time(NULL));
-
-    // Initialize array with consecutive integers from 1 to n
-    for (int i = 0; i < n; ++i) {
-        A[i] = i + 1;
-    }
-
-    // Fisher-Yates shuffle algorithm
-    for (int i = n - 1; i > 0; --i) {
-        int j = rand() % (i + 1);
-        temp = A[i];
-        A[i] = A[j];
-        A[j] = temp;
-    }
-}
-
 int main(int argc, char *argv[]) {
 	if (argc != 2) {
-		printf("false arguments\n");
+		if (!my_rank) printf("False arguments\n");
 		exit(1);
 	}
     int k = atoi(argv[1]);
@@ -67,54 +41,23 @@ int main(int argc, char *argv[]) {
 	MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
 	
 	// ALLOCATE MEMORY FROM WEB
-	const char *url="https://dumps.wikimedia.org/other/static_html_dumps/current/en/wikipedia-en-html.tar.7z";
+	const char *url="https://dumps.wikimedia.org/other/static_html_dumps/current/en/skins.lst";
 	ARRAY result = getWikiPartition(url, my_rank, num_procs);
 	local_size = (int)result.size;
 	A_local = (int*)result.data;	
 	printf("Process %d local size: %d\n", my_rank, local_size);
+	// it is assumed that n >> num_procs
 	int activeProcs = num_procs;
 	
-	
-	/*ALLOCATE MEMORY LOCALLY with Scatter
-	int A[] = {1, 2, 3};
-	int n = sizeof(A) / sizeof(int);	
-	// decide size to be distributed and allocate memory	
-	int local_size = n / num_procs;	
-	if (n % num_procs) local_size++;
-	
-	// calculate how many processes will have data distributed to them
-	int activeProcs;
-	if (num_procs >= n) activeProcs = n;
-	else {
-		activeProcs = n / local_size;
-		if (n % local_size) activeProcs++;
-	}
-	if (!my_rank) printf("Using %d processes\n", activeProcs);
-	
-	// allocate memory and distribute data accordingly
-	
-	A_local = (int*)malloc(local_size * sizeof(int));
-	if (A_local == NULL) {
-		perror("Memory allocation failed");
-		exit(1);
-	}	
-	
-	MPI_Scatter(A, local_size, MPI_INT, A_local, local_size, MPI_INT, 0, MPI_COMM_WORLD);
-	
-	
-	// trim size of last process when needed
-	if (my_rank * local_size < n && (my_rank + 1) * local_size > n) local_size = n - my_rank * local_size;
-	*/
-	
-	printf("Starting algorithm\n");
+	MPI_Barrier(MPI_COMM_WORLD);
 	
 	// master process initialization
 	if (my_rank == 0) {
-		pivot = A_local[0];
-		direction = 1;
+		printf("\nData received, starting algorithm\n\n");
+		pivot = A_local[0];		
 	}
+	direction = 1;
 	MPI_Bcast(&pivot, 1, MPI_INT, 0, MPI_COMM_WORLD);
-	MPI_Bcast(&direction, 1, MPI_INT, 0, MPI_COMM_WORLD);
 	
 	//pointer to the available parts of the local arrays
 	int pointers[2] = {0, local_size - 1};
@@ -122,15 +65,11 @@ int main(int argc, char *argv[]) {
 	//-----------------------------------------------------------------
 	int counter = 0;
 	while(counter < local_size) {
-		counter++;
-		
+		counter++;		
 		MPI_Barrier(MPI_COMM_WORLD);	
 
-		// PROCCESS LOGIC
-		if (my_rank < activeProcs) {
-			///if (pointers[1] == local_size) pointers[1]--;			
-			
-			//printf("Process %d performs partition to (%d, %d)\n", my_rank, pointers[0], pointers[1]);
+		// EAH PROCESS FINDS A BREAKPOINT
+		if (my_rank < activeProcs) {			
 			// zero elements left
 			if (pointers[0] > pointers[1]) {}
 			else if (pointers[0] >= local_size) breakpoint = local_size - 1;
@@ -139,22 +78,17 @@ int main(int argc, char *argv[]) {
 			else if (pointers[1] == pointers[0]) {
 				if (A_local[pointers[0]] >= pivot) breakpoint = pointers[0];
 				else breakpoint = pointers[0] + 1;
-				// make array not usable
-				//pointers[0]++;
 			}
-			// more than one elements are left
+			// more than one element is left
 			else {
-				breakpoint = partitioninplace(A_local, local_size, pivot, pointers[0], pointers[1]);
-				
+				breakpoint = partitioninplace(A_local, local_size, pivot, pointers[0], pointers[1]);				
 			}
-			//printf("Process %d array after partition: ", my_rank);
-			//for(int i = pointers[0]; i <= pointers[1]; i++) printf("%d ", A_local[i]);
-			//printf("\n");
 			
 			//send poitners
 			MPI_Send(&breakpoint, 1, MPI_INT, 0, my_rank, MPI_COMM_WORLD);
 		}
 		
+		// MASTER PROCESS DECIDES NEXT STEP
 		if (my_rank == 0) {			
 			//receive breakpoints and sum them
 			int recv_data;
@@ -162,25 +96,13 @@ int main(int argc, char *argv[]) {
 			for(int i = 0; i < activeProcs; i++) {
 				MPI_Recv(&recv_data, 1, MPI_INT, i, i, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 				elementsSmallerThanPivot += recv_data;
-				//printf("Got %d from process %d\n", recv_data, i);
 			}
-			//printf("Found %d elements smaller than %d\n", elementsSmallerThanPivot, pivot);
 			
-			//checks for next step
-			if (elementsSmallerThanPivot + 1 == k) {
-				//printf("Found kth smallest element.\n");
-				termination_signal = 1;
-			}
-			else {
-				if (elementsSmallerThanPivot + 1 > k) {
-					//printf("Checking on the left part\n");
-					direction = 0;
-					}
-				else {					
-					direction = 1;
-					//printf("Checking on the right part.\n");
-				}		
-			}		
+			// next step decision
+			if (elementsSmallerThanPivot + 1 == k) termination_signal = 1;
+			else if (elementsSmallerThanPivot + 1 > k) direction = 0;
+			else direction = 1;
+				
 		}		
 		// Exit the loop if termination signal is broadcasted
 		MPI_Barrier(MPI_COMM_WORLD);
@@ -190,7 +112,9 @@ int main(int argc, char *argv[]) {
 		// Broadcast direction
 		MPI_Bcast(&direction, 1, MPI_INT, 0, MPI_COMM_WORLD);				
 		
-		// handle direction if array still is usable
+		// DIRECTION HANDLING
+		
+		// change pointers accordingly
 		if (my_rank < activeProcs) {
 			if (direction) pointers[0] = breakpoint;
 			else pointers[1] = breakpoint - 1;
@@ -198,34 +122,34 @@ int main(int argc, char *argv[]) {
 
 		// exclude the pivot in the next step
 		if (my_rank == pivot_sender) {
+				// find the pivot index
 				int pivotIndex = local_size;
 				for(int i = 0; i < local_size; i++) {
 					if (A_local[i] == pivot) {
 						pivotIndex = i;
 						break;
 					}
-				}			
+				}		
 				
-				// swap the pivot at end of array if it's found within the usable spectrum
-				// ie when direction is right we swap it with the left end and increase the left end
-				// vice verse for left direction. this ensures that each steps limits at least one
-				// element, even if pivot appears many times
+				/* Remove pivot if it's found within the usable spectrum, ie when the direction is right swap it with the left end and
+				increase the pointers by one. This works vice versa when the direction is left and ensures that each steps limits
+				at least one element of the original data, even if pivot appears many times */
 				if (pivotIndex <= pointers[1]) {
 					A_local[pivotIndex] = A_local[pointers[!direction]];
 					A_local[pointers[!direction]] = pivot;
 				
-					if (direction) pointers[!direction]++;
-					else pointers[!direction]--;
+					if (direction) pointers[0]++;
+					else pointers[1]--;
 				}
 				
 				// specific occasion that pivot is the only elemnt left
 				if (pointers[0] > pointers[1] && direction) breakpoint++;
-		}
-		
-		
-		MPI_Barrier(MPI_COMM_WORLD);
+		}		
+				
+		// NEW PIVOT ASSSIGNMENT
 		
 		// assign new pivot sender
+		MPI_Barrier(MPI_COMM_WORLD);
 		if (my_rank < activeProcs)
 			MPI_Send(pointers, 2, MPI_INT, 0, my_rank, MPI_COMM_WORLD);
 
@@ -244,12 +168,11 @@ int main(int argc, char *argv[]) {
 		// pivot sender assigns new pivot value
 		if (my_rank == pivot_sender) {
 			pivot = A_local[pointers[0]];
-			//printf("\nNew pivot is %d from process %d\n", pivot, my_rank);
 		}
 		MPI_Bcast(&pivot, 1, MPI_INT, pivot_sender, MPI_COMM_WORLD);
 	}
 	//--------------------------------------------------------------------------
-	// print result and free allocated memory
+	// RESULT DISPLAY AND MEMORY DE-ALLOCATION
 	if (my_rank == 0) {
 		if (k % 10 == 1) printf("%dst ", k);
 		else if (k % 10 == 2) printf("%dnd ", k);
@@ -260,15 +183,12 @@ int main(int argc, char *argv[]) {
 	}
 	free(A_local);
 	MPI_Finalize(); 
-    
-
+   
     return 0;
 }
 
 // function that partitions an input array of size n according to a pivot value v
-int partitioninplace(int A[], int n, int v, int start, int end) {
-	int temp = 0;
-	// pointers at each end of the array (as specified by input)
+int partitioninplace(int A[], int n, int v, int start, int end) {	
     if(end > n - 1) {
     	printf("End = %d out of bounds.\n", end);
     	return 0;
@@ -277,13 +197,16 @@ int partitioninplace(int A[], int n, int v, int start, int end) {
     	printf("Start = %d out of bouns\n", start);
     	return 0;
     }
+    int temp = 0;
+    
+    // pointers at each end of the array (as specified by input)
     int left = start;
     int right = end;
 	
 	// repeats until left reaches right or all elements are checked
     while (left <= right && left < end) {    	 
         if (A[left] >= v && A[right] < v) {
-        	// elements at both pointers are on the wrong "side" of the array -> swap them
+        	// if elements at both pointers are on the wrong "side" of the array -> swap them
             temp = A[left];
             A[left] = A[right];
             A[right] = temp;
