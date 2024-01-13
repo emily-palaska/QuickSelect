@@ -9,11 +9,12 @@
 #include <inttypes.h>
 
 int partitioninplace(uint32_t A[], int n, int v, int start, int end);
-uint32_t *getData(int *result, int my_rank, int num_procs);
+uint32_t *getData(long int *local_size, int my_rank, int num_procs);
 
 int main(int argc, char *argv[]) {    
-    int num_procs, my_rank, pivot_sender, direction, breakpoint, local_size;
+    int num_procs, my_rank, pivot_sender, direction, breakpoint;
 	int termination_signal = 0;
+	long int local_size;
 	uint32_t* A_local;
 	uint32_t pivot;
 	
@@ -23,11 +24,7 @@ int main(int argc, char *argv[]) {
 	MPI_Comm_size(MPI_COMM_WORLD, &num_procs);
 	MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
 	
-	if (argc != 2) {
-		if (!my_rank) printf("False arguments\n");
-		exit(1);
-	}
-    int k = atoi(argv[1]);	
+	int k;
 	int activeProcs = num_procs;
 	
 	//ALLOCATE MEMORY LOCALLY
@@ -36,7 +33,9 @@ int main(int argc, char *argv[]) {
 	MPI_Barrier(MPI_COMM_WORLD);
 	// master process initialization
 	if (my_rank == 0) {
-		printf("\nData received, starting algorithm\n\n");
+		printf("\nData received successfully\n");
+		srand(time(NULL));
+    	k = rand() % (local_size * num_procs) + 1;	
 		pivot = A_local[0];		
 	}
 	
@@ -44,13 +43,14 @@ int main(int argc, char *argv[]) {
 	startTime = time(NULL);
 	direction = 1;
 	MPI_Bcast(&pivot, 1, MPI_INT, 0, MPI_COMM_WORLD);
+	MPI_Bcast(&k, 1, MPI_INT, 0, MPI_COMM_WORLD);
 	
 	//pointer to the available parts of the local arrays
-	int pointers[2] = {0, local_size - 1};
+	long int pointers[2] = {0, local_size - 1};
 	
 	//-----------------------------------------------------------------
 	int counter = 0;
-	while(counter < local_size) {
+	while(counter < local_size * num_procs) {
 		counter++;		
 		MPI_Barrier(MPI_COMM_WORLD);	
 
@@ -214,8 +214,8 @@ int partitioninplace(uint32_t A[], int n, int v, int start, int end) {
     return left;
 }
 
-uint32_t *getData(int* local_size, int my_rank, int num_procs) {
-	int start, end;
+uint32_t *getData(long int* local_size, int my_rank, int num_procs) {
+	long int start, end;
 	uint32_t *result;
 	
 	if (my_rank >= num_procs) {
@@ -251,10 +251,10 @@ uint32_t *getData(int* local_size, int my_rank, int num_procs) {
 		exit(1);
 	}
 	*local_size = end - start;
-	printf("Process %d size: %d - %d\n", my_rank, start, end);
+	printf("Process %d size: %ld - %ld\n", my_rank, start, end);
 
 	// Allocate memory
-	result = (uint32_t*)malloc((end - start) * sizeof(uint32_t));
+	result = (uint32_t*)malloc(*local_size * sizeof(uint32_t));
 	if (result == NULL) {
 		perror("Error in memory allocation");
 		exit(1);
